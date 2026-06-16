@@ -74,6 +74,27 @@ curl http://127.0.0.1:8080/health
 
 Supported chat params: `messages`, `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`.
 
+### OpenAI SDK compatibility
+
+Works directly with the official OpenAI SDKs — just point `base_url` at this server:
+
+```python
+from openai import OpenAI
+c = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="sk-noop")
+c.embeddings.create(model="multilingual-e5-small", input=["hello", "bonjour"])
+c.chat.completions.create(model="gemma-4-e2b-it",
+    messages=[{"role": "user", "content": "Hi"}])
+```
+
+The embeddings endpoint honors `encoding_format` (`float` and `base64`). This matters:
+the OpenAI SDKs default to requesting `base64` and decode it client-side, so a server
+that ignored it would break the stock SDK. Both formats return identical vectors.
+
+> **Note on retrieval quality:** `multilingual-e5-small` was trained with `query:` /
+> `passage:` input prefixes. The OpenAI embeddings API has no way to signal which is which,
+> so all text is embedded uniformly. Vectors are valid and cosine-comparable, but for
+> best asymmetric retrieval you'd prefix inputs yourself before sending them.
+
 ## Design notes
 
 - The non-`Send` llama.cpp context lives on a dedicated worker thread; requests are

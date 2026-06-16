@@ -204,6 +204,17 @@ async fn chat_completions(
 
 // ---------- /v1/embeddings ----------
 
+/// Encode a float vector as base64 of its raw little-endian f32 bytes — the
+/// layout the OpenAI SDKs expect when decoding `encoding_format: "base64"`.
+fn encode_f32_base64(v: &[f32]) -> String {
+    use base64::Engine;
+    let mut bytes = Vec::with_capacity(v.len() * 4);
+    for f in v {
+        bytes.extend_from_slice(&f.to_le_bytes());
+    }
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum EmbeddingInput {
@@ -214,13 +225,26 @@ enum EmbeddingInput {
 #[derive(Deserialize)]
 struct EmbeddingRequest {
     input: EmbeddingInput,
+    /// "float" (default) or "base64". The official OpenAI SDKs default to
+    /// "base64" and decode it client-side, so we must honor it.
+    #[serde(default)]
+    encoding_format: Option<String>,
+}
+
+/// An embedding is serialized either as a JSON float array or, for
+/// `encoding_format: "base64"`, as a base64 string of little-endian f32 bytes.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum EmbeddingValue {
+    Float(Vec<f32>),
+    Base64(String),
 }
 
 #[derive(Serialize)]
 struct EmbeddingData {
     object: &'static str,
     index: usize,
-    embedding: Vec<f32>,
+    embedding: EmbeddingValue,
 }
 
 #[derive(Serialize)]
@@ -253,6 +277,17 @@ async fn embeddings(
     }
     let approx_tokens: usize = texts.iter().map(|t| t.split_whitespace().count()).sum();
 
+    let as_base64 = match req.encoding_format.as_deref() {
+        None | Some("float") => false,
+        Some("base64") => true,
+        Some(other) => {
+            return Err(ApiError(
+                StatusCode::BAD_REQUEST,
+                format!("unsupported encoding_format: {other}"),
+            ))
+        }
+    };
+
     let embedder = s.embedder.clone();
     let vectors = tokio::task::spawn_blocking(move || embedder.embed(texts))
         .await
@@ -262,10 +297,14 @@ async fn embeddings(
     let data = vectors
         .into_iter()
         .enumerate()
-        .map(|(index, embedding)| EmbeddingData {
+        .map(|(index, v)| EmbeddingData {
             object: "embedding",
             index,
-            embedding,
+            embedding: if as_base64 {
+                EmbeddingValue::Base64(encode_f32_base64(&v))
+            } else {
+                EmbeddingValue::Float(v)
+            },
         })
         .collect();
 
