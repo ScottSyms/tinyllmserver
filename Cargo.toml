@@ -2,7 +2,7 @@
 name = "tinymodelserver"
 version = "0.1.0"
 edition = "2021"
-description = "Tiny OpenAI-compatible local server for Gemma 4 (GGUF) + fastembed multilingual embeddings"
+description = "Tiny OpenAI-compatible local server for a GGUF chat model (default Qwen3) + fastembed multilingual embeddings"
 
 [[bin]]
 name = "tinymodelserver"
@@ -25,7 +25,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
 anyhow = "1"
 base64 = "0.22"
-minijinja = { version = "2", features = ["loop_controls"] }
+minijinja = { version = "2", features = ["loop_controls", "json"] }
 minijinja-contrib = { version = "2", features = ["pycompat"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

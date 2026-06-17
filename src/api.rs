@@ -10,8 +10,8 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::chat;
 use crate::embeddings::Embedder;
-use crate::gemma;
 use crate::llm::{GenRequest, LlmHandle};
 
 #[derive(Clone)]
@@ -19,6 +19,7 @@ pub struct AppState {
     pub llm: LlmHandle,
     pub embedder: Arc<Embedder>,
     pub env: Arc<minijinja::Environment<'static>>,
+    pub bos_token: Arc<str>,
     pub model_id: String,
     pub embed_id: String,
 }
@@ -189,7 +190,7 @@ async fn chat_completions(
         n_tools
     );
 
-    let prompt = gemma::render_prompt(&s.env, req.messages.clone(), req.tools.clone())
+    let prompt = chat::render_prompt(&s.env, req.messages.clone(), req.tools.clone(), &s.bos_token)
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
     tracing::debug!("rendered prompt:\n{prompt}");
 
@@ -210,7 +211,7 @@ async fn chat_completions(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     tracing::debug!("raw completion:\n{}", out.text);
-    let parsed = gemma::parse_completion(&out.text);
+    let parsed = chat::parse_completion(&out.text);
     tracing::debug!(
         "parsed: {} tool call(s), content {} chars",
         parsed.tool_calls.len(),

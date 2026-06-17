@@ -62,12 +62,20 @@ pub struct LlmConfig {
     pub n_gpu_layers: u32,
 }
 
+/// What `start` returns once the model is ready.
+pub struct LlmInit {
+    pub handle: LlmHandle,
+    /// The model's embedded Jinja chat template.
+    pub chat_template: String,
+    /// The model's BOS token as a string (empty if it has none).
+    pub bos_token: String,
+}
+
 /// Spawn the inference worker. Blocks until the model is loaded so startup
-/// errors surface immediately rather than on the first request. Returns the
-/// handle plus the model's embedded chat template.
-pub fn start(cfg: LlmConfig) -> Result<(LlmHandle, String)> {
+/// errors surface immediately rather than on the first request.
+pub fn start(cfg: LlmConfig) -> Result<LlmInit> {
     let (tx, rx) = mpsc::channel::<Job>();
-    let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<(String, String), String>>();
 
     std::thread::Builder::new()
         .name("llm-worker".into())
@@ -121,7 +129,13 @@ pub fn start(cfg: LlmConfig) -> Result<(LlmHandle, String)> {
                 }
             };
 
-            let _ = ready_tx.send(Ok(template));
+            // The model's BOS string, for templates that prepend it explicitly.
+            let bos = model
+                .token_to_piece_bytes(model.token_bos(), 8, true, None)
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+
+            let _ = ready_tx.send(Ok((template, bos)));
 
             // Serve requests one at a time on this thread (state is not Send).
             for job in rx {
@@ -132,12 +146,16 @@ pub fn start(cfg: LlmConfig) -> Result<(LlmHandle, String)> {
         })
         .context("failed to spawn inference worker thread")?;
 
-    let template = ready_rx
+    let (chat_template, bos_token) = ready_rx
         .recv()
         .context("inference worker exited during startup")?
         .map_err(anyhow::Error::msg)?;
 
-    Ok((LlmHandle { tx }, template))
+    Ok(LlmInit {
+        handle: LlmHandle { tx },
+        chat_template,
+        bos_token,
+    })
 }
 
 fn build_sampler(req: &GenRequest) -> LlamaSampler {
@@ -218,11 +236,11 @@ fn generate(
         ctx.decode(&mut batch).context("decode failed")?;
     }
 
-    // Gemma's turn-end markers (`<turn|>` for Gemma 4, `<end_of_turn>` for the
-    // older template) aren't always flagged as EOG tokens, so they can render as
+    // Turn-end markers (`<turn|>`/`<end_of_turn>` for Gemma, `<|im_end|>` for
+    // Qwen/ChatML) aren't always flagged as EOG tokens, so they can render as
     // literal text just before generation stops. Cut at the earliest one.
     let mut text = String::from_utf8_lossy(&out_bytes).to_string();
-    let cut = ["<turn|>", "<end_of_turn>"]
+    let cut = ["<turn|>", "<end_of_turn>", "<|im_end|>"]
         .iter()
         .filter_map(|m| text.find(m))
         .min();

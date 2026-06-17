@@ -1,7 +1,7 @@
 mod api;
+mod chat;
 mod config;
 mod embeddings;
-mod gemma;
 mod llm;
 
 use anyhow::{Context, Result};
@@ -35,14 +35,15 @@ async fn main() -> Result<()> {
     let model_path = resolve_model(&cfg)?;
     tracing::info!("loading chat model: {}", model_path.display());
 
-    let (llm, chat_template) = llm::start(LlmConfig {
+    let init = llm::start(LlmConfig {
         model_path,
         n_ctx: cfg.ctx_size,
         n_threads: cfg.threads(),
         n_gpu_layers: cfg.gpu_layers(),
     })
     .context("failed to start inference worker")?;
-    let env = Arc::new(gemma::build_env(chat_template).context("invalid chat template")?);
+    let env = Arc::new(chat::build_env(init.chat_template).context("invalid chat template")?);
+    let bos_token: Arc<str> = Arc::from(init.bos_token.as_str());
     tracing::info!("chat model ready");
 
     // Load the embedding model (downloads on first run).
@@ -51,9 +52,10 @@ async fn main() -> Result<()> {
     tracing::info!("embedding model ready (dim={})", embedder.dim);
 
     let state = AppState {
-        llm,
+        llm: init.handle,
         embedder,
         env,
+        bos_token,
         model_id: cfg.model_id.clone(),
         embed_id: cfg.embed_id.clone(),
     };

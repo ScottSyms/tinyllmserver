@@ -1,13 +1,15 @@
-//! Gemma 4 chat templating and tool-call (de)serialization.
+//! Model-agnostic chat templating and tool-call (de)serialization.
 //!
-//! We render the model's own Jinja chat template (extracted from the GGUF) with
-//! minijinja, passing the OpenAI `messages` and `tools` straight through. That
-//! gives the exact prompt the model was trained on — including Gemma 4's tool
-//! definition blocks (`<|tool>…<tool|>`) and turn tokens (`<|turn>…<turn|>`).
+//! Prompts are rendered with the model's own Jinja chat template (extracted from
+//! the GGUF) via minijinja, passing the OpenAI `messages` and `tools` straight
+//! through. That makes the prompt side work for any model whose GGUF ships a
+//! template (Gemma, Qwen, …).
 //!
-//! On the way back, the model emits tool calls in Gemma's notation
-//! (`<|tool_call>call:NAME{arg:<|"|>val<|"|>}<tool_call|>`), which we parse into
-//! standard OpenAI `tool_calls` with JSON arguments.
+//! Parsing the *output* is model-specific, so we recognize the two common
+//! shapes:
+//!   * Qwen / Hermes:  `<tool_call>{"name":…,"arguments":{…}}</tool_call>`
+//!   * Gemma 4:        `<|tool_call>call:NAME{arg:<|"|>val<|"|>}<tool_call|>`
+//! and strip both thinking conventions (`<think>…</think>`, `<|channel>…`).
 
 use anyhow::{anyhow, Result};
 use minijinja::{context, Environment, Value as JValue};
@@ -18,22 +20,25 @@ const STR_DELIM: &str = "<|\"|>";
 
 pub fn build_env(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
-    // Enable Python-style methods the template relies on (.get, .strip, …).
+    // Enable Python-style methods the templates rely on (.get, .strip, .split…).
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_template_owned("chat", template)
         .map_err(|e| anyhow!("failed to parse chat template: {e}"))?;
     Ok(env)
 }
 
-/// Render the prompt from OpenAI-style messages and tools.
+/// Render the prompt from OpenAI-style messages and tools. `bos_token` is the
+/// model's actual BOS string (empty if it has none); templates that prepend BOS
+/// reference it, others ignore it.
 pub fn render_prompt(
     env: &Environment,
     mut messages: Vec<Value>,
     tools: Option<Value>,
+    bos_token: &str,
 ) -> Result<String> {
-    // OpenAI sends assistant tool-call arguments as a JSON *string*; the template
-    // serializes a mapping into Gemma notation but echoes a string verbatim, so
-    // parse it into an object first to keep history in the native format.
+    // OpenAI sends assistant tool-call arguments as a JSON *string*; some
+    // templates serialize a mapping differently than a raw string, so parse it
+    // into an object first to keep history in the native format.
     for m in &mut messages {
         if m.get("role").and_then(Value::as_str) == Some("assistant") {
             if let Some(tcs) = m.get_mut("tool_calls").and_then(Value::as_array_mut) {
@@ -56,7 +61,7 @@ pub fn render_prompt(
             messages => JValue::from_serialize(&messages),
             tools => JValue::from_serialize(&tools),
             add_generation_prompt => true,
-            bos_token => "<bos>",
+            bos_token => bos_token,
         })
         .map_err(|e| anyhow!("template render failed: {e}"))?;
     Ok(rendered)
@@ -75,33 +80,20 @@ pub struct Parsed {
 
 /// Split a raw model turn into free-text content and structured tool calls.
 pub fn parse_completion(raw: &str) -> Parsed {
-    // Drop any reasoning/thinking channel; it is not part of the reply.
-    let stripped = remove_spans(raw, "<|channel>", "<channel|>");
-
-    let mut tool_calls = Vec::new();
-    let mut content = String::new();
-    let mut rest = stripped.as_str();
-
-    while let Some(start) = rest.find("<|tool_call>") {
-        content.push_str(&rest[..start]);
-        let after = &rest[start + "<|tool_call>".len()..];
-        match after.find("<tool_call|>") {
-            Some(end) => {
-                if let Some(tc) = parse_call(&after[..end]) {
-                    tool_calls.push(tc);
-                }
-                rest = &after[end + "<tool_call|>".len()..];
-            }
-            None => {
-                if let Some(tc) = parse_call(after) {
-                    tool_calls.push(tc);
-                }
-                rest = "";
-                break;
-            }
-        }
+    // Drop reasoning/thinking; it is not part of the reply.
+    let s = remove_spans(raw, "<|channel>", "<channel|>");
+    let mut s = remove_spans(&s, "<think>", "</think>");
+    // Qwen opens <think> in the prompt, so the output may carry only the closer.
+    if let Some(idx) = s.rfind("</think>") {
+        s = s[idx + "</think>".len()..].to_string();
     }
-    content.push_str(rest);
+
+    // Pick the format by which marker the model used.
+    let (content, tool_calls) = if s.contains("<tool_call>") {
+        extract(&s, "<tool_call>", "</tool_call>", parse_qwen_call)
+    } else {
+        extract(&s, "<|tool_call>", "<tool_call|>", parse_gemma_call)
+    };
 
     let content = content.trim();
     let content = if content.is_empty() {
@@ -112,9 +104,56 @@ pub fn parse_completion(raw: &str) -> Parsed {
     Parsed { content, tool_calls }
 }
 
-/// Parse `call:NAME{ …gemma notation… }` into a name + JSON-string arguments.
-fn parse_call(body: &str) -> Option<ParsedToolCall> {
-    let body = body.trim().strip_prefix("call:").unwrap_or(body.trim());
+/// Pull every `open … close` block out of `s`, parsing each with `parse`; the
+/// text outside the blocks is returned as content.
+fn extract<F>(s: &str, open: &str, close: &str, parse: F) -> (String, Vec<ParsedToolCall>)
+where
+    F: Fn(&str) -> Option<ParsedToolCall>,
+{
+    let mut calls = Vec::new();
+    let mut content = String::new();
+    let mut rest = s;
+    while let Some(i) = rest.find(open) {
+        content.push_str(&rest[..i]);
+        let after = &rest[i + open.len()..];
+        match after.find(close) {
+            Some(j) => {
+                if let Some(tc) = parse(&after[..j]) {
+                    calls.push(tc);
+                }
+                rest = &after[j + close.len()..];
+            }
+            None => {
+                if let Some(tc) = parse(after) {
+                    calls.push(tc);
+                }
+                rest = "";
+                break;
+            }
+        }
+    }
+    content.push_str(rest);
+    (content, calls)
+}
+
+/// Qwen/Hermes: the block body is a JSON object `{"name":…,"arguments":…}`.
+fn parse_qwen_call(inner: &str) -> Option<ParsedToolCall> {
+    let v: Value = serde_json::from_str(inner.trim()).ok()?;
+    let name = v.get("name")?.as_str()?.to_string();
+    let args = v
+        .get("arguments")
+        .cloned()
+        .unwrap_or(Value::Object(Map::new()));
+    let arguments = match args {
+        Value::String(s) => s,
+        other => serde_json::to_string(&other).ok()?,
+    };
+    Some(ParsedToolCall { name, arguments })
+}
+
+/// Gemma 4: the block body is `call:NAME{ …gemma notation… }`.
+fn parse_gemma_call(inner: &str) -> Option<ParsedToolCall> {
+    let body = inner.trim().strip_prefix("call:").unwrap_or(inner.trim());
     let brace = body.find('{')?;
     let name = body[..brace].trim().to_string();
     if name.is_empty() {
