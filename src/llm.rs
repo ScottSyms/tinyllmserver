@@ -1,28 +1,25 @@
+//! Chat inference backend: OxiBonsai (pure-Rust 1-bit engine) running a Bonsai
+//! GGUF. The non-`Send` engine/model/mmap live on a dedicated worker thread;
+//! requests arrive over a channel and results return via oneshot.
+
 use anyhow::{Context, Result};
-use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
 
-use llama_cpp_2::context::params::LlamaContextParams;
-use llama_cpp_2::context::LlamaContext;
-use llama_cpp_2::llama_backend::LlamaBackend;
-use llama_cpp_2::llama_batch::LlamaBatch;
-use llama_cpp_2::model::params::LlamaModelParams;
-use llama_cpp_2::model::{AddBos, LlamaModel};
-use llama_cpp_2::sampling::LlamaSampler;
+use oxibonsai_core::gguf::reader::{mmap_gguf_file, GgufFile};
+use oxibonsai_runtime::engine::InferenceEngine;
+use oxibonsai_runtime::sampling::SamplingParams;
+use oxibonsai_runtime::tokenizer_bridge::TokenizerBridge;
 
 /// Parameters for a single generation request.
+///
+/// Note: sampling (temperature/top_p/top_k/seed) is configured once at engine
+/// build — OxiBonsai's blocking `generate()` uses the engine's sampler — so the
+/// OpenAI request's per-call sampling fields are accepted but not applied.
 pub struct GenRequest {
     pub prompt: String,
-    /// Prepend the BOS token at tokenization. False when the prompt text
-    /// already contains `<bos>` (e.g. rendered by the model's chat template).
-    pub add_bos: bool,
     pub max_tokens: usize,
-    pub temperature: f32,
-    pub top_p: f32,
-    pub top_k: i32,
-    pub seed: u32,
 }
 
 /// Result of a generation, including token accounting for the OpenAI usage block.
@@ -57,9 +54,13 @@ impl LlmHandle {
 
 pub struct LlmConfig {
     pub model_path: PathBuf,
-    pub n_ctx: u32,
-    pub n_threads: i32,
-    pub n_gpu_layers: u32,
+    pub tokenizer_path: PathBuf,
+    pub max_seq_len: usize,
+    pub temperature: f32,
+    pub top_p: f32,
+    pub top_k: usize,
+    pub repetition_penalty: f32,
+    pub seed: u64,
 }
 
 /// What `start` returns once the model is ready.
@@ -67,7 +68,7 @@ pub struct LlmInit {
     pub handle: LlmHandle,
     /// The model's embedded Jinja chat template.
     pub chat_template: String,
-    /// The model's BOS token as a string (empty if it has none).
+    /// The model's BOS token as a string (empty if it has none, e.g. Qwen/Bonsai).
     pub bos_token: String,
 }
 
@@ -80,67 +81,59 @@ pub fn start(cfg: LlmConfig) -> Result<LlmInit> {
     std::thread::Builder::new()
         .name("llm-worker".into())
         .spawn(move || {
-            let backend = match LlamaBackend::init() {
-                Ok(b) => b,
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("backend init failed: {e}")));
-                    return;
-                }
-            };
-
-            let model_params = LlamaModelParams::default().with_n_gpu_layers(cfg.n_gpu_layers);
-            let model = match LlamaModel::load_from_file(&backend, &cfg.model_path, &model_params) {
+            // mmap -> gguf -> engine form a borrow chain, so they all live here
+            // as locals for the lifetime of the worker.
+            let mmap = match mmap_gguf_file(&cfg.model_path) {
                 Ok(m) => m,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(format!("model load failed: {e}")));
+                    let _ = ready_tx.send(Err(format!("mmap {} failed: {e:?}", cfg.model_path.display())));
                     return;
                 }
             };
-
-            let ctx_params = LlamaContextParams::default()
-                .with_n_ctx(NonZeroU32::new(cfg.n_ctx))
-                // Logical batch must be able to hold a full-context prompt in one
-                // decode() call; the default (2048) aborts on longer prompts.
-                .with_n_batch(cfg.n_ctx)
-                .with_n_threads(cfg.n_threads)
-                .with_n_threads_batch(cfg.n_threads);
-
-            let mut ctx = match model.new_context(&backend, ctx_params) {
-                Ok(c) => c,
+            let gguf = match GgufFile::parse(&mmap[..]) {
+                Ok(g) => g,
                 Err(e) => {
-                    let _ = ready_tx.send(Err(format!("context creation failed: {e}")));
+                    let _ = ready_tx.send(Err(format!("GGUF parse failed: {e:?}")));
                     return;
                 }
             };
 
-            // Extract the chat template baked into the model so the server can
-            // render prompts (including tool definitions) exactly as trained.
-            let template = match model.chat_template(None) {
-                Ok(t) => match t.to_string() {
-                    Ok(s) => s,
+            let template = gguf
+                .metadata
+                .get_string("tokenizer.chat_template")
+                .unwrap_or_default()
+                .to_string();
+
+            let tokenizer = match TokenizerBridge::from_file(&cfg.tokenizer_path.to_string_lossy()) {
+                Ok(t) => t,
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("tokenizer load failed: {e:?}")));
+                    return;
+                }
+            };
+
+            let params = SamplingParams {
+                temperature: cfg.temperature,
+                top_k: cfg.top_k,
+                top_p: cfg.top_p,
+                repetition_penalty: cfg.repetition_penalty,
+                max_tokens: cfg.max_seq_len,
+            };
+
+            let mut engine =
+                match InferenceEngine::from_gguf(&gguf, params, cfg.seed, cfg.max_seq_len) {
+                    Ok(e) => e,
                     Err(e) => {
-                        let _ = ready_tx.send(Err(format!("chat template is not UTF-8: {e}")));
+                        let _ = ready_tx.send(Err(format!("engine init failed: {e:?}")));
                         return;
                     }
-                },
-                Err(e) => {
-                    let _ = ready_tx.send(Err(format!("could not read chat template: {e}")));
-                    return;
-                }
-            };
+                };
 
-            // The model's BOS string, for templates that prepend it explicitly.
-            let bos = model
-                .token_to_piece_bytes(model.token_bos(), 8, true, None)
-                .map(|b| String::from_utf8_lossy(&b).into_owned())
-                .unwrap_or_default();
+            // BOS: Bonsai/Qwen3 templates don't prepend one.
+            let _ = ready_tx.send(Ok((template, String::new())));
 
-            let _ = ready_tx.send(Ok((template, bos)));
-
-            // Serve requests one at a time on this thread (state is not Send).
             for job in rx {
-                let result = generate(&model, &mut ctx, cfg.n_ctx, &job.req)
-                    .map_err(|e| e.to_string());
+                let result = generate(&mut engine, &tokenizer, &job.req).map_err(|e| e.to_string());
                 let _ = job.resp.send(result);
             }
         })
@@ -158,102 +151,35 @@ pub fn start(cfg: LlmConfig) -> Result<LlmInit> {
     })
 }
 
-fn build_sampler(req: &GenRequest) -> LlamaSampler {
-    if req.temperature <= 0.0 {
-        return LlamaSampler::greedy();
-    }
-    LlamaSampler::chain_simple([
-        LlamaSampler::top_k(req.top_k.max(1)),
-        LlamaSampler::top_p(req.top_p.clamp(0.0, 1.0), 1),
-        LlamaSampler::temp(req.temperature),
-        LlamaSampler::dist(req.seed),
-    ])
-}
-
 fn generate(
-    model: &LlamaModel,
-    ctx: &mut LlamaContext,
-    n_ctx: u32,
+    engine: &mut InferenceEngine,
+    tokenizer: &TokenizerBridge,
     req: &GenRequest,
 ) -> Result<GenResult> {
-    ctx.clear_kv_cache();
+    let prompt_tokens = tokenizer
+        .encode(&req.prompt)
+        .map_err(|e| anyhow::anyhow!("tokenize failed: {e:?}"))?;
+    let n_prompt = prompt_tokens.len();
 
-    let add_bos = if req.add_bos {
-        AddBos::Always
+    let out = engine
+        .generate(&prompt_tokens, req.max_tokens)
+        .map_err(|e| anyhow::anyhow!("generation failed: {e:?}"))?;
+
+    let text = tokenizer
+        .decode(&out)
+        .map_err(|e| anyhow::anyhow!("decode failed: {e:?}"))?;
+
+    // generate() stops either at EOS or after max_tokens; infer which.
+    let finish_reason = if out.len() >= req.max_tokens {
+        "length"
     } else {
-        AddBos::Never
+        "stop"
     };
-    let tokens = model
-        .str_to_token(&req.prompt, add_bos)
-        .context("tokenization failed")?;
-    let n_prompt = tokens.len();
-
-    // Leave room for at least one generated token. Reject (don't abort) if the
-    // prompt alone won't fit the context window.
-    if n_prompt >= n_ctx as usize {
-        anyhow::bail!(
-            "prompt is {n_prompt} tokens but the context window is {n_ctx}; \
-             increase --ctx-size or shorten the prompt"
-        );
-    }
-
-    let mut batch = LlamaBatch::new(n_ctx as usize, 1);
-    let last = tokens.len() as i32 - 1;
-    for (i, token) in tokens.into_iter().enumerate() {
-        batch.add(token, i as i32, &[0], i as i32 == last)?;
-    }
-    ctx.decode(&mut batch).context("prompt decode failed")?;
-
-    let mut sampler = build_sampler(req);
-    let mut out_bytes: Vec<u8> = Vec::new();
-    let mut n_cur = batch.n_tokens();
-    let mut n_decode = 0usize;
-    let mut finish_reason = "length";
-
-    while n_decode < req.max_tokens {
-        let token = sampler.sample(ctx, batch.n_tokens() - 1);
-        sampler.accept(token);
-
-        if model.is_eog_token(token) {
-            finish_reason = "stop";
-            break;
-        }
-
-        // Keep special tokens (special=true) so tool-call markers like
-        // `<|tool_call>` and the string delimiter `<|"|>` survive for parsing.
-        let bytes = model.token_to_piece_bytes(token, 32, true, None)?;
-        out_bytes.extend_from_slice(&bytes);
-
-        batch.clear();
-        batch.add(token, n_cur, &[0], true)?;
-        n_cur += 1;
-        n_decode += 1;
-
-        if n_cur as u32 >= n_ctx {
-            finish_reason = "length";
-            break;
-        }
-        ctx.decode(&mut batch).context("decode failed")?;
-    }
-
-    // Turn-end markers (`<turn|>`/`<end_of_turn>` for Gemma, `<|im_end|>` for
-    // Qwen/ChatML) aren't always flagged as EOG tokens, so they can render as
-    // literal text just before generation stops. Cut at the earliest one.
-    let mut text = String::from_utf8_lossy(&out_bytes).to_string();
-    let cut = ["<turn|>", "<end_of_turn>", "<|im_end|>"]
-        .iter()
-        .filter_map(|m| text.find(m))
-        .min();
-    if let Some(idx) = cut {
-        text.truncate(idx);
-        finish_reason = "stop";
-    }
-    let text = text.trim().to_string();
 
     Ok(GenResult {
         text,
         prompt_tokens: n_prompt,
-        completion_tokens: n_decode,
+        completion_tokens: out.len(),
         finish_reason,
     })
 }

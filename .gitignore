@@ -1,3 +1,4 @@
 /target
 *.gguf
 /.fastembed_cache
+/models

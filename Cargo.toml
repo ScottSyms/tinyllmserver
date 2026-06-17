@@ -2,19 +2,15 @@
 name = "tinymodelserver"
 version = "0.1.0"
 edition = "2021"
-description = "Tiny OpenAI-compatible local server for a GGUF chat model (default LFM2.5) + fastembed multilingual embeddings"
+description = "Tiny OpenAI-compatible local server for PrismML Bonsai (1-bit, via OxiBonsai) + fastembed multilingual embeddings"
 
 [[bin]]
 name = "tinymodelserver"
 path = "src/main.rs"
 
-[features]
-default = []
-# Opt-in GPU backends (need the matching toolkit installed at build time).
-# Metal is enabled automatically on macOS (see target dependency below).
-cuda = ["llama-cpp-2/cuda"]
-vulkan = ["llama-cpp-2/vulkan"]
-rocm = ["llama-cpp-2/rocm"]
+[[example]]
+name = "bonsai_spike"
+path = "examples/bonsai_spike.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
@@ -31,13 +27,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"] }
 
-# CPU/portable everywhere. Metal is added only on macOS below.
-llama-cpp-2 = { version = "0.1" }
 fastembed = "5"
+
+# Pure-Rust 1-bit inference engine for Bonsai (Q1_0). No C/C++/cmake.
+# Metal is enabled only on macOS (see target dependency below).
+oxibonsai-core = "0.2.2"
+oxibonsai-runtime = { version = "0.2.2", default-features = false }
 
 # Enable Metal GPU acceleration on macOS only.
 [target.'cfg(target_os = "macos")'.dependencies]
-llama-cpp-2 = { version = "0.1", features = ["metal"] }
+oxibonsai-runtime = { version = "0.2.2", default-features = false, features = ["metal"] }
 
 [profile.release]
 opt-level = 3
