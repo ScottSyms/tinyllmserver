@@ -69,7 +69,7 @@ All flags have `TMS_*` env-var equivalents:
 | `--host` | `127.0.0.1` | Bind address (localhost only) |
 | `--model` | _(download)_ | Path to a local `.gguf` to skip the download |
 | `--model-repo` / `--model-file` | `unsloth/gemma-4-E2B-it-GGUF` / `gemma-4-E2B-it-Q4_K_M.gguf` | HF source |
-| `--ctx-size` | `4096` | Context window |
+| `--ctx-size` | `8192` | Context window (Gemma 4 supports up to 256K) |
 | `--threads` | _auto_ | CPU threads |
 | `--gpu-layers` | all (GPU build) / 0 (CPU) | Layers to offload to GPU |
 

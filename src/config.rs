@@ -34,7 +34,7 @@ pub struct Config {
     pub model_id: String,
 
     /// Context window size (tokens).
-    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 4096)]
+    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 8192)]
     pub ctx_size: u32,
 
     /// CPU threads for inference. Defaults to available parallelism.
