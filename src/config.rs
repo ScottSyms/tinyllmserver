@@ -37,8 +37,8 @@ pub struct Config {
     #[arg(long, env = "TMS_MODEL_ID", default_value = "lfm2.5-1.2b-thinking")]
     pub model_id: String,
 
-    /// Context window size (tokens).
-    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 8192)]
+    /// Context window size (tokens). 32K is LFM2.5's full window.
+    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 32768)]
     pub ctx_size: u32,
 
     /// Default max generated tokens when the request doesn't set max_tokens.

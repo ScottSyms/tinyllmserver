@@ -71,7 +71,7 @@ All flags have `TMS_*` env-var equivalents:
 | `--host` | `127.0.0.1` | Bind address (localhost only) |
 | `--model` | _(download)_ | Path to a local `.gguf` to skip the download |
 | `--model-repo` / `--model-file` | `LiquidAI/LFM2.5-1.2B-Thinking-GGUF` / `LFM2.5-1.2B-Thinking-Q4_K_M.gguf` | HF source |
-| `--ctx-size` | `8192` | Context window |
+| `--ctx-size` | `32768` | Context window (LFM2.5's full 32K) |
 | `--threads` | _auto_ | CPU threads |
 | `--gpu-layers` | all (GPU build) / 0 (CPU) | Layers to offload to GPU |
 
