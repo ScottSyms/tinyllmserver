@@ -25,27 +25,21 @@ async fn main() -> Result<()> {
 
     let cfg = Config::parse();
 
-    let backend = if cfg!(target_os = "macos") {
-        "OxiBonsai (Metal)"
-    } else {
-        "OxiBonsai (CPU)"
-    };
-    tracing::info!("backend: {backend}, 1-bit Q1_0");
+    tracing::info!(
+        "acceleration: {} (gpu_layers={})",
+        Config::acceleration(),
+        cfg.gpu_layers()
+    );
 
-    // Resolve the GGUF chat model + tokenizer (local paths or download from HF).
+    // Resolve the GGUF chat model (local path or download from HF).
     let model_path = resolve_model(&cfg)?;
-    let tokenizer_path = resolve_tokenizer(&cfg)?;
     tracing::info!("loading chat model: {}", model_path.display());
 
     let init = llm::start(LlmConfig {
         model_path,
-        tokenizer_path,
-        max_seq_len: cfg.ctx_size as usize,
-        temperature: cfg.temperature,
-        top_p: cfg.top_p,
-        top_k: cfg.top_k,
-        repetition_penalty: cfg.repeat_penalty,
-        seed: cfg.seed,
+        n_ctx: cfg.ctx_size,
+        n_threads: cfg.threads(),
+        n_gpu_layers: cfg.gpu_layers(),
     })
     .context("failed to start inference worker")?;
     let env = Arc::new(chat::build_env(init.chat_template).context("invalid chat template")?);
@@ -102,30 +96,6 @@ fn resolve_model(cfg: &Config) -> Result<PathBuf> {
             format!(
                 "failed to download {} from {}",
                 cfg.model_file, cfg.model_repo
-            )
-        })?;
-    Ok(path)
-}
-
-fn resolve_tokenizer(cfg: &Config) -> Result<PathBuf> {
-    if let Some(path) = &cfg.tokenizer {
-        anyhow::ensure!(path.exists(), "tokenizer file not found: {}", path.display());
-        return Ok(path.clone());
-    }
-
-    tracing::info!(
-        "no --tokenizer given; fetching {} / {} from Hugging Face",
-        cfg.tokenizer_repo,
-        cfg.tokenizer_file
-    );
-    let api = hf_hub::api::sync::Api::new().context("failed to init Hugging Face client")?;
-    let path = api
-        .model(cfg.tokenizer_repo.clone())
-        .get(&cfg.tokenizer_file)
-        .with_context(|| {
-            format!(
-                "failed to download {} from {}",
-                cfg.tokenizer_file, cfg.tokenizer_repo
             )
         })?;
     Ok(path)

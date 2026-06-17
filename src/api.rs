@@ -112,9 +112,14 @@ struct ChatRequest {
     tools: Option<serde_json::Value>,
     #[serde(default)]
     max_tokens: Option<usize>,
-    // Other OpenAI sampling fields (temperature/top_p/top_k/seed) are accepted
-    // but ignored: OxiBonsai samples with the engine-level sampler set at
-    // startup (configure via --temperature/--top-p/--top-k/--seed).
+    #[serde(default)]
+    temperature: Option<f32>,
+    #[serde(default)]
+    top_p: Option<f32>,
+    #[serde(default)]
+    top_k: Option<i32>,
+    #[serde(default)]
+    seed: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -190,12 +195,15 @@ async fn chat_completions(
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
     tracing::debug!("rendered prompt:\n{prompt}");
 
-    // `default_max_tokens` is a HARD ceiling, not just a default: a single
-    // serialized worker means one runaway generation (a small model rambling
-    // without EOS) stalls every other request. Cap it so each turn is bounded.
-    let cap = s.default_max_tokens.max(1);
-    let max_tokens = req.max_tokens.unwrap_or(cap).min(cap);
-    let gen = GenRequest { prompt, max_tokens };
+    let gen = GenRequest {
+        prompt,
+        add_bos: false, // the template emits <bos> itself
+        max_tokens: req.max_tokens.unwrap_or(s.default_max_tokens).clamp(1, 32768),
+        temperature: req.temperature.unwrap_or(0.7),
+        top_p: req.top_p.unwrap_or(0.95),
+        top_k: req.top_k.unwrap_or(40),
+        seed: req.seed.unwrap_or_else(|| now() as u32),
+    };
 
     let out = s
         .llm

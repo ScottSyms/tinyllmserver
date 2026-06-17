@@ -1,8 +1,9 @@
 [tools]
+cmake = "latest"
 rust = "latest"
 
 [env]
-# OxiBonsai is pure Rust (no cmake/C++), but the dep tree is large; parallelize.
+# llama.cpp build can be slow the first time; allow more parallelism.
 CARGO_BUILD_JOBS = "8"
 
 [tasks.build]
