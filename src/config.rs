@@ -41,7 +41,8 @@ pub struct Config {
     #[arg(long, env = "TMS_THREADS")]
     pub threads: Option<i32>,
 
-    /// Layers to offload to GPU. Defaults: all on macOS (Metal), 0 elsewhere.
+    /// Layers to offload to GPU. Defaults: all when built with a GPU backend
+    /// (Metal on macOS, or --features cuda/vulkan/rocm), 0 on CPU-only builds.
     #[arg(long, env = "TMS_GPU_LAYERS")]
     pub gpu_layers: Option<u32>,
 
@@ -60,6 +61,32 @@ impl Config {
     }
 
     pub fn gpu_layers(&self) -> u32 {
-        self.gpu_layers.unwrap_or(if cfg!(target_os = "macos") { 999 } else { 0 })
+        // Offload everything to the GPU when an accelerated backend is compiled
+        // in; otherwise keep all layers on the CPU.
+        self.gpu_layers
+            .unwrap_or(if Self::gpu_available() { 999 } else { 0 })
+    }
+
+    /// Whether a GPU backend was compiled into this build.
+    pub const fn gpu_available() -> bool {
+        cfg!(target_os = "macos")
+            || cfg!(feature = "cuda")
+            || cfg!(feature = "rocm")
+            || cfg!(feature = "vulkan")
+    }
+
+    /// Human-readable name of the active acceleration backend.
+    pub const fn acceleration() -> &'static str {
+        if cfg!(feature = "cuda") {
+            "CUDA"
+        } else if cfg!(feature = "rocm") {
+            "ROCm/HIP"
+        } else if cfg!(feature = "vulkan") {
+            "Vulkan"
+        } else if cfg!(target_os = "macos") {
+            "Metal"
+        } else {
+            "CPU"
+        }
     }
 }

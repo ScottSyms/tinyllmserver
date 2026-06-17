@@ -8,6 +8,14 @@ description = "Tiny OpenAI-compatible local server for Gemma 4 (GGUF) + fastembe
 name = "tinymodelserver"
 path = "src/main.rs"
 
+[features]
+default = []
+# Opt-in GPU backends (need the matching toolkit installed at build time).
+# Metal is enabled automatically on macOS (see target dependency below).
+cuda = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]
+rocm = ["llama-cpp-2/rocm"]
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "signal"] }
 axum = "0.8"

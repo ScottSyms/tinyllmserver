@@ -29,8 +29,35 @@ mise run build                  # cargo build --release
 mise run run                    # runs on http://127.0.0.1:8080
 ```
 
-On first launch it downloads the chat GGUF (~3 GB) and the embedding model into the
+On first launch it downloads the chat GGUF (~2 GB) and the embedding model into the
 Hugging Face cache. Subsequent launches are offline-capable.
+
+### GPU acceleration
+
+The default build is **Metal-accelerated on macOS** and **CPU elsewhere**. On
+Windows/Linux with a GPU, enable the matching backend at build time (the relevant
+toolkit must be installed):
+
+```sh
+# NVIDIA (CUDA toolkit required)
+cargo build --release --features cuda
+
+# Cross-vendor (Vulkan SDK required) — NVIDIA / AMD / Intel
+cargo build --release --features vulkan
+
+# AMD (ROCm/HIP required)
+cargo build --release --features rocm
+```
+
+When an accelerated backend is compiled in, all model layers are offloaded to the GPU
+by default (`--gpu-layers 999`) and flash attention is enabled automatically where the
+backend supports it. The active backend is printed at startup:
+
+```
+INFO acceleration: CUDA (gpu_layers=999)
+```
+
+Tune offload with `--gpu-layers N` (lower it if the model doesn't fit in VRAM).
 
 ### Configuration
 
@@ -44,7 +71,7 @@ All flags have `TMS_*` env-var equivalents:
 | `--model-repo` / `--model-file` | `unsloth/gemma-4-E2B-it-GGUF` / `gemma-4-E2B-it-Q4_K_M.gguf` | HF source |
 | `--ctx-size` | `4096` | Context window |
 | `--threads` | _auto_ | CPU threads |
-| `--gpu-layers` | all (mac) / 0 | GPU offload |
+| `--gpu-layers` | all (GPU build) / 0 (CPU) | Layers to offload to GPU |
 
 Example with a local model and custom port:
 

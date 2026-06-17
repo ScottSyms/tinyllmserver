@@ -24,6 +24,12 @@ async fn main() -> Result<()> {
 
     let cfg = Config::parse();
 
+    tracing::info!(
+        "acceleration: {} (gpu_layers={})",
+        Config::acceleration(),
+        cfg.gpu_layers()
+    );
+
     // Resolve the GGUF chat model (local path or download from HF).
     let model_path = resolve_model(&cfg)?;
     tracing::info!("loading chat model: {}", model_path.display());
