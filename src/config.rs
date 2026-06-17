@@ -46,8 +46,10 @@ pub struct Config {
     #[arg(long, env = "TMS_MODEL_ID", default_value = "bonsai-8b")]
     pub model_id: String,
 
-    /// Maximum sequence length (context window) for the engine.
-    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 8192)]
+    /// Maximum sequence length (context window) for the engine. Bonsai-8B's full
+    /// window is 64K. This also sizes the KV buffers, so generation is capped to
+    /// fit; lower it to reduce memory if you don't need the full window.
+    #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 65536)]
     pub ctx_size: u32,
 
     /// Default max generated tokens when the request doesn't set max_tokens.

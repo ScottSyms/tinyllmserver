@@ -43,4 +43,6 @@ opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = true
-panic = "abort"
+# Unwind (not abort) so a panic inside the inference engine can be contained to
+# a single request via catch_unwind instead of killing the whole server.
+panic = "unwind"

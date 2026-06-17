@@ -56,7 +56,7 @@ All flags have `TMS_*` env-var equivalents:
 | `--model-repo` / `--model-file` | `prism-ml/Bonsai-8B-gguf` / `Bonsai-8B-Q1_0.gguf` | HF source for the GGUF |
 | `--tokenizer` | _(download)_ | Path to a local `tokenizer.json` |
 | `--tokenizer-repo` / `--tokenizer-file` | `prism-ml/Bonsai-8B-unpacked` / `tokenizer.json` | HF source for the tokenizer |
-| `--ctx-size` | `8192` | Max sequence length |
+| `--ctx-size` | `65536` | Max sequence length (Bonsai-8B's full 64K); sizes the KV buffers, and generation is capped so prompt + output fits |
 | `--max-tokens` | `2048` | Default generation cap when the request omits `max_tokens` |
 | `--temperature` / `--top-p` / `--top-k` / `--repeat-penalty` / `--seed` | `0.7` / `0.9` / `40` / `1.1` / `42` | Sampling (set at startup) |
 

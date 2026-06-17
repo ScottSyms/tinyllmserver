@@ -132,8 +132,10 @@ pub fn start(cfg: LlmConfig) -> Result<LlmInit> {
             // BOS: Bonsai/Qwen3 templates don't prepend one.
             let _ = ready_tx.send(Ok((template, String::new())));
 
+            let max_seq_len = cfg.max_seq_len;
             for job in rx {
-                let result = generate(&mut engine, &tokenizer, &job.req).map_err(|e| e.to_string());
+                let result = generate(&mut engine, &tokenizer, &job.req, max_seq_len)
+                    .map_err(|e| e.to_string());
                 let _ = job.resp.send(result);
             }
         })
@@ -155,26 +157,38 @@ fn generate(
     engine: &mut InferenceEngine,
     tokenizer: &TokenizerBridge,
     req: &GenRequest,
+    max_seq_len: usize,
 ) -> Result<GenResult> {
     let prompt_tokens = tokenizer
         .encode(&req.prompt)
         .map_err(|e| anyhow::anyhow!("tokenize failed: {e:?}"))?;
     let n_prompt = prompt_tokens.len();
 
-    let out = engine
-        .generate(&prompt_tokens, req.max_tokens)
-        .map_err(|e| anyhow::anyhow!("generation failed: {e:?}"))?;
+    // The engine's KV buffers are sized to max_seq_len; the position must never
+    // reach it or OxiBonsai indexes out of bounds. Reject an over-long prompt
+    // and cap generation so prompt + output fits the window.
+    anyhow::ensure!(
+        n_prompt < max_seq_len,
+        "prompt is {n_prompt} tokens but the context window is {max_seq_len}; \
+         raise --ctx-size or shorten the input"
+    );
+    let budget = max_seq_len - n_prompt;
+    let max = req.max_tokens.min(budget).max(1);
+
+    // OxiBonsai is young and can panic on edge cases; contain it to this request
+    // (requires unwinding — see the release profile) so the worker survives.
+    let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        engine.generate(&prompt_tokens, max)
+    }))
+    .map_err(|_| anyhow::anyhow!("inference engine panicked while generating"))?
+    .map_err(|e| anyhow::anyhow!("generation failed: {e:?}"))?;
 
     let text = tokenizer
         .decode(&out)
         .map_err(|e| anyhow::anyhow!("decode failed: {e:?}"))?;
 
-    // generate() stops either at EOS or after max_tokens; infer which.
-    let finish_reason = if out.len() >= req.max_tokens {
-        "length"
-    } else {
-        "stop"
-    };
+    // generate() stops either at EOS or after the token budget; infer which.
+    let finish_reason = if out.len() >= max { "length" } else { "stop" };
 
     Ok(GenResult {
         text,
