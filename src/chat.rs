@@ -35,6 +35,7 @@ pub fn render_prompt(
     mut messages: Vec<Value>,
     tools: Option<Value>,
     bos_token: &str,
+    enable_thinking: bool,
 ) -> Result<String> {
     for m in &mut messages {
         let Some(obj) = m.as_object_mut() else { continue };
@@ -80,6 +81,7 @@ pub fn render_prompt(
             tools => JValue::from_serialize(&tools),
             add_generation_prompt => true,
             bos_token => bos_token,
+            enable_thinking => enable_thinking,
         })
         .map_err(|e| anyhow!("template render failed: {e}"))?;
     Ok(rendered)

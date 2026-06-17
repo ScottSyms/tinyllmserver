@@ -48,6 +48,13 @@ pub struct Config {
     #[arg(long, env = "TMS_GPU_LAYERS")]
     pub gpu_layers: Option<u32>,
 
+    /// Enable the model's reasoning/"thinking" mode (e.g. Qwen3 `<think>`).
+    /// Off by default: thinking burns tokens and wall-clock time, so agent
+    /// clients with short timeouts or low max_tokens otherwise get cut off
+    /// mid-thought (empty replies). Turn on for higher-quality standalone chat.
+    #[arg(long, env = "TMS_THINKING", default_value_t = false)]
+    pub thinking: bool,
+
     /// Embedding model id reported by the API.
     #[arg(long, env = "TMS_EMBED_ID", default_value = "multilingual-e5-small")]
     pub embed_id: String,

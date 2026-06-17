@@ -103,6 +103,12 @@ curl http://127.0.0.1:8080/health
 
 Supported chat params: `messages`, `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `tools`.
 
+> **Thinking mode is off by default.** Qwen3 (and other reasoning models) otherwise emit a
+> long `<think>…</think>` trace before answering, which burns time and tokens — agent clients
+> with short timeouts or low `max_tokens` get cut off mid-thought and see empty replies. With
+> thinking off the model answers / calls tools directly (~1s vs >120s here). Enable it for
+> higher-quality standalone chat with `--thinking` (`TMS_THINKING=true`).
+
 ### Function / tool calling
 
 Standard OpenAI function calling is supported. Pass `tools`; when the model decides to

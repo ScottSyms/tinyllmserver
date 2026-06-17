@@ -20,6 +20,7 @@ pub struct AppState {
     pub embedder: Arc<Embedder>,
     pub env: Arc<minijinja::Environment<'static>>,
     pub bos_token: Arc<str>,
+    pub enable_thinking: bool,
     pub default_max_tokens: usize,
     pub model_id: String,
     pub embed_id: String,
@@ -191,8 +192,14 @@ async fn chat_completions(
         n_tools
     );
 
-    let prompt = chat::render_prompt(&s.env, req.messages.clone(), req.tools.clone(), &s.bos_token)
-        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
+    let prompt = chat::render_prompt(
+        &s.env,
+        req.messages.clone(),
+        req.tools.clone(),
+        &s.bos_token,
+        s.enable_thinking,
+    )
+    .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
     tracing::debug!("rendered prompt:\n{prompt}");
 
     let gen = GenRequest {
