@@ -190,10 +190,12 @@ async fn chat_completions(
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
     tracing::debug!("rendered prompt:\n{prompt}");
 
-    let gen = GenRequest {
-        prompt,
-        max_tokens: req.max_tokens.unwrap_or(s.default_max_tokens).clamp(1, 32768),
-    };
+    // `default_max_tokens` is a HARD ceiling, not just a default: a single
+    // serialized worker means one runaway generation (a small model rambling
+    // without EOS) stalls every other request. Cap it so each turn is bounded.
+    let cap = s.default_max_tokens.max(1);
+    let max_tokens = req.max_tokens.unwrap_or(cap).min(cap);
+    let gen = GenRequest { prompt, max_tokens };
 
     let out = s
         .llm
