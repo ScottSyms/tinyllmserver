@@ -87,6 +87,9 @@ pub fn start(cfg: LlmConfig) -> Result<LlmHandle> {
 
             let ctx_params = LlamaContextParams::default()
                 .with_n_ctx(NonZeroU32::new(cfg.n_ctx))
+                // Logical batch must be able to hold a full-context prompt in one
+                // decode() call; the default (2048) aborts on longer prompts.
+                .with_n_batch(cfg.n_ctx)
                 .with_n_threads(cfg.n_threads)
                 .with_n_threads_batch(cfg.n_threads);
 
@@ -141,6 +144,15 @@ fn generate(
         .str_to_token(&req.prompt, AddBos::Always)
         .context("tokenization failed")?;
     let n_prompt = tokens.len();
+
+    // Leave room for at least one generated token. Reject (don't abort) if the
+    // prompt alone won't fit the context window.
+    if n_prompt >= n_ctx as usize {
+        anyhow::bail!(
+            "prompt is {n_prompt} tokens but the context window is {n_ctx}; \
+             increase --ctx-size or shorten the prompt"
+        );
+    }
 
     let mut batch = LlamaBatch::new(n_ctx as usize, 1);
     let last = tokens.len() as i32 - 1;
