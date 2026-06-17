@@ -2,7 +2,7 @@
 name = "tinymodelserver"
 version = "0.1.0"
 edition = "2021"
-description = "Tiny OpenAI-compatible local server for a GGUF chat model (default Qwen3) + fastembed multilingual embeddings"
+description = "Tiny OpenAI-compatible local server for a GGUF chat model (default LFM2.5) + fastembed multilingual embeddings"
 
 [[bin]]
 name = "tinymodelserver"

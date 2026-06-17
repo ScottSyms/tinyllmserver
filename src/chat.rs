@@ -5,11 +5,11 @@
 //! through. That makes the prompt side work for any model whose GGUF ships a
 //! template (Gemma, Qwen, …).
 //!
-//! Parsing the *output* is model-specific, so we recognize the two common
-//! shapes:
+//! Parsing the *output* is model-specific, so we recognize the common shapes:
+//!   * LFM2 (Liquid):  `<|tool_call_start|>[fn(arg="v")]<|tool_call_end|>` (Pythonic)
 //!   * Qwen / Hermes:  `<tool_call>{"name":…,"arguments":{…}}</tool_call>`
 //!   * Gemma 4:        `<|tool_call>call:NAME{arg:<|"|>val<|"|>}<tool_call|>`
-//! and strip both thinking conventions (`<think>…</think>`, `<|channel>…`).
+//! and strip the common thinking conventions (`<think>…`, `<|channel>…`).
 
 use anyhow::{anyhow, Result};
 use minijinja::{context, Environment, Value as JValue};
@@ -107,10 +107,16 @@ pub fn parse_completion(raw: &str) -> Parsed {
     }
 
     // Pick the format by which marker the model used.
-    let (content, tool_calls) = if s.contains("<tool_call>") {
-        extract(&s, "<tool_call>", "</tool_call>", parse_qwen_call)
+    let (content, tool_calls) = if s.contains("<|tool_call_start|>") {
+        extract(&s, "<|tool_call_start|>", "<|tool_call_end|>", parse_lfm2_block)
+    } else if s.contains("<tool_call>") {
+        extract(&s, "<tool_call>", "</tool_call>", |i| {
+            parse_qwen_call(i).into_iter().collect()
+        })
     } else {
-        extract(&s, "<|tool_call>", "<tool_call|>", parse_gemma_call)
+        extract(&s, "<|tool_call>", "<tool_call|>", |i| {
+            parse_gemma_call(i).into_iter().collect()
+        })
     };
 
     let content = content.trim();
@@ -122,11 +128,11 @@ pub fn parse_completion(raw: &str) -> Parsed {
     Parsed { content, tool_calls }
 }
 
-/// Pull every `open … close` block out of `s`, parsing each with `parse`; the
-/// text outside the blocks is returned as content.
+/// Pull every `open … close` block out of `s`, parsing each with `parse` (which
+/// may yield several calls per block); text outside the blocks becomes content.
 fn extract<F>(s: &str, open: &str, close: &str, parse: F) -> (String, Vec<ParsedToolCall>)
 where
-    F: Fn(&str) -> Option<ParsedToolCall>,
+    F: Fn(&str) -> Vec<ParsedToolCall>,
 {
     let mut calls = Vec::new();
     let mut content = String::new();
@@ -136,15 +142,11 @@ where
         let after = &rest[i + open.len()..];
         match after.find(close) {
             Some(j) => {
-                if let Some(tc) = parse(&after[..j]) {
-                    calls.push(tc);
-                }
+                calls.extend(parse(&after[..j]));
                 rest = &after[j + close.len()..];
             }
             None => {
-                if let Some(tc) = parse(after) {
-                    calls.push(tc);
-                }
+                calls.extend(parse(after));
                 rest = "";
                 break;
             }
@@ -167,6 +169,16 @@ fn parse_qwen_call(inner: &str) -> Option<ParsedToolCall> {
         other => serde_json::to_string(&other).ok()?,
     };
     Some(ParsedToolCall { name, arguments })
+}
+
+/// LFM2 (Liquid): the block body is a Python list of calls,
+/// e.g. `[get_weather(location="Tokyo", unit="celsius")]`.
+fn parse_lfm2_block(inner: &str) -> Vec<ParsedToolCall> {
+    let mut p = Py {
+        s: inner.trim(),
+        i: 0,
+    };
+    p.parse_call_list()
 }
 
 /// Gemma 4: the block body is `call:NAME{ …gemma notation… }`.
@@ -295,6 +307,228 @@ impl<'a> Parser<'a> {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
             "null" => Value::Null,
+            _ => {
+                if let Ok(n) = tok.parse::<i64>() {
+                    Value::Number(n.into())
+                } else if let Ok(f) = tok.parse::<f64>() {
+                    serde_json::Number::from_f64(f)
+                        .map(Value::Number)
+                        .unwrap_or(Value::String(tok))
+                } else {
+                    Value::String(tok)
+                }
+            }
+        }
+    }
+}
+
+/// Recursive-descent parser for LFM2's Pythonic tool-call list, e.g.
+/// `[get_weather(location="Tokyo", unit="celsius"), ping()]`.
+struct Py<'a> {
+    s: &'a str,
+    i: usize,
+}
+
+impl<'a> Py<'a> {
+    fn rest(&self) -> &'a str {
+        &self.s[self.i..]
+    }
+
+    fn skip_ws(&mut self) {
+        while self.i < self.s.len() && self.s.as_bytes()[self.i].is_ascii_whitespace() {
+            self.i += 1;
+        }
+    }
+
+    fn eat(&mut self, c: u8) -> bool {
+        if self.s.as_bytes().get(self.i) == Some(&c) {
+            self.i += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn read_ident(&mut self) -> String {
+        self.skip_ws();
+        let r = self.rest();
+        let end = r
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .unwrap_or(r.len());
+        let id = r[..end].to_string();
+        self.i += end;
+        id
+    }
+
+    /// `[call, call, …]`, or a single bare `call`.
+    fn parse_call_list(&mut self) -> Vec<ParsedToolCall> {
+        let mut calls = Vec::new();
+        self.skip_ws();
+        let bracketed = self.eat(b'[');
+        loop {
+            self.skip_ws();
+            if self.i >= self.s.len() || (bracketed && self.rest().starts_with(']')) {
+                break;
+            }
+            match self.parse_call() {
+                Some(tc) => calls.push(tc),
+                None => break,
+            }
+            self.skip_ws();
+            if !self.eat(b',') {
+                break;
+            }
+        }
+        calls
+    }
+
+    /// `name(key=value, …)`
+    fn parse_call(&mut self) -> Option<ParsedToolCall> {
+        let name = self.read_ident();
+        if name.is_empty() {
+            return None;
+        }
+        self.skip_ws();
+        if !self.eat(b'(') {
+            return None;
+        }
+        let mut args = Map::new();
+        loop {
+            self.skip_ws();
+            if self.rest().starts_with(')') {
+                self.i += 1;
+                break;
+            }
+            let key = self.read_ident();
+            self.skip_ws();
+            if self.eat(b'=') {
+                let val = self.parse_value()?;
+                if !key.is_empty() {
+                    args.insert(key, val);
+                }
+            } else {
+                // positional/unnamed arg: consume so we keep making progress
+                let _ = self.parse_value();
+            }
+            self.skip_ws();
+            match self.s.as_bytes().get(self.i) {
+                Some(b',') => self.i += 1,
+                Some(b')') => {
+                    self.i += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        let arguments = serde_json::to_string(&Value::Object(args)).ok()?;
+        Some(ParsedToolCall { name, arguments })
+    }
+
+    fn parse_value(&mut self) -> Option<Value> {
+        self.skip_ws();
+        match self.s.as_bytes().get(self.i)? {
+            b'"' | b'\'' => Some(Value::String(self.read_string())),
+            b'[' => self.parse_list(),
+            b'{' => self.parse_dict(),
+            _ => Some(self.parse_bare()),
+        }
+    }
+
+    fn read_string(&mut self) -> String {
+        let q = self.s.as_bytes()[self.i];
+        self.i += 1;
+        let mut out = String::new();
+        let bytes = self.s.as_bytes();
+        while self.i < self.s.len() {
+            let b = bytes[self.i];
+            if b == b'\\' && self.i + 1 < self.s.len() {
+                let n = bytes[self.i + 1];
+                out.push(match n {
+                    b'n' => '\n',
+                    b't' => '\t',
+                    b'r' => '\r',
+                    other => other as char,
+                });
+                self.i += 2;
+                continue;
+            }
+            if b == q {
+                self.i += 1;
+                break;
+            }
+            let ch = self.rest().chars().next().unwrap();
+            out.push(ch);
+            self.i += ch.len_utf8();
+        }
+        out
+    }
+
+    fn parse_list(&mut self) -> Option<Value> {
+        self.i += 1; // consume '['
+        let mut arr = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.rest().starts_with(']') {
+                self.i += 1;
+                break;
+            }
+            arr.push(self.parse_value()?);
+            self.skip_ws();
+            match self.s.as_bytes().get(self.i) {
+                Some(b',') => self.i += 1,
+                Some(b']') => {
+                    self.i += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Some(Value::Array(arr))
+    }
+
+    fn parse_dict(&mut self) -> Option<Value> {
+        self.i += 1; // consume '{'
+        let mut map = Map::new();
+        loop {
+            self.skip_ws();
+            if self.rest().starts_with('}') {
+                self.i += 1;
+                break;
+            }
+            let key = match self.s.as_bytes().get(self.i)? {
+                b'"' | b'\'' => self.read_string(),
+                _ => self.read_ident(),
+            };
+            self.skip_ws();
+            if !self.eat(b':') {
+                break;
+            }
+            let val = self.parse_value()?;
+            map.insert(key, val);
+            self.skip_ws();
+            match self.s.as_bytes().get(self.i) {
+                Some(b',') => self.i += 1,
+                Some(b'}') => {
+                    self.i += 1;
+                    break;
+                }
+                _ => break,
+            }
+        }
+        Some(Value::Object(map))
+    }
+
+    fn parse_bare(&mut self) -> Value {
+        let r = self.rest();
+        let end = r
+            .find([',', ')', ']', '}'])
+            .unwrap_or(r.len());
+        let tok = r[..end].trim().to_string();
+        self.i += end;
+        match tok.as_str() {
+            "True" | "true" => Value::Bool(true),
+            "False" | "false" => Value::Bool(false),
+            "None" | "null" => Value::Null,
             _ => {
                 if let Ok(n) = tok.parse::<i64>() {
                     Value::Number(n.into())

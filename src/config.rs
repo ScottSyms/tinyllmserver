@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-/// Tiny OpenAI-compatible local server: GGUF chat (default Qwen3) + fastembed embeddings.
+/// Tiny OpenAI-compatible local server: GGUF chat (default LFM2.5) + fastembed embeddings.
 #[derive(Parser, Debug, Clone)]
 #[command(version, about)]
 pub struct Config {
@@ -18,15 +18,23 @@ pub struct Config {
     pub model: Option<PathBuf>,
 
     /// Hugging Face repo to pull the GGUF from when --model is not set.
-    #[arg(long, env = "TMS_MODEL_REPO", default_value = "unsloth/Qwen3-1.7B-GGUF")]
+    #[arg(
+        long,
+        env = "TMS_MODEL_REPO",
+        default_value = "LiquidAI/LFM2.5-1.2B-Thinking-GGUF"
+    )]
     pub model_repo: String,
 
     /// GGUF filename inside the repo (used with --model-repo).
-    #[arg(long, env = "TMS_MODEL_FILE", default_value = "Qwen3-1.7B-Q4_K_M.gguf")]
+    #[arg(
+        long,
+        env = "TMS_MODEL_FILE",
+        default_value = "LFM2.5-1.2B-Thinking-Q4_K_M.gguf"
+    )]
     pub model_file: String,
 
     /// Public model id reported by the API (the OpenAI `model` field).
-    #[arg(long, env = "TMS_MODEL_ID", default_value = "qwen3-1.7b")]
+    #[arg(long, env = "TMS_MODEL_ID", default_value = "lfm2.5-1.2b-thinking")]
     pub model_id: String,
 
     /// Context window size (tokens).
