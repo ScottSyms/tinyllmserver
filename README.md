@@ -2,14 +2,16 @@
 
 A tiny, fast, low-memory OpenAI-compatible server (Rust) that hosts two local models:
 
-- **Chat** — Gemma 4 E2B (instruction-tuned), 4-bit **GGUF** via [llama.cpp](https://github.com/ggml-org/llama.cpp) bindings.
+- **Chat** — Gemma 4 E4B (instruction-tuned), 4-bit **GGUF** via [llama.cpp](https://github.com/ggml-org/llama.cpp) bindings.
 - **Embeddings** — `multilingual-e5-small` via [fastembed](https://crates.io/crates/fastembed) (multilingual, 384-dim).
 
 Binds to **localhost only** on a configurable port. Runs on **macOS** (Metal GPU) and **Windows** (CPU).
 
-> **Note on the model:** an MLX `…-4bit` build of Gemma 4 E2B is Apple-only and won't run on
+> **Note on the model:** an MLX `…-4bit` build of Gemma 4 is Apple-only and won't run on
 > Windows. To get the *same model on both platforms*, this server uses the **GGUF** build
-> (`gemma-4-E2B-it-Q4_K_M`, ~4-bit). It is Metal-accelerated on Mac and runs on CPU on Windows.
+> (`gemma-4-E4B-it-Q4_K_M`, ~4-bit). It is Metal-accelerated on Mac and runs on CPU on Windows.
+> E4B is the larger "effective 4B" variant — better at agentic tool use than E2B. Swap to
+> the lighter E2B with `--model-repo unsloth/gemma-4-E2B-it-GGUF --model-file gemma-4-E2B-it-Q4_K_M.gguf`.
 
 ## Prerequisites
 
@@ -29,7 +31,7 @@ mise run build                  # cargo build --release
 mise run run                    # runs on http://127.0.0.1:8080
 ```
 
-On first launch it downloads the chat GGUF (~2 GB) and the embedding model into the
+On first launch it downloads the chat GGUF (~5 GB) and the embedding model into the
 Hugging Face cache. Subsequent launches are offline-capable.
 
 ### GPU acceleration
@@ -68,7 +70,7 @@ All flags have `TMS_*` env-var equivalents:
 | `--port` | `8080` | Listen port |
 | `--host` | `127.0.0.1` | Bind address (localhost only) |
 | `--model` | _(download)_ | Path to a local `.gguf` to skip the download |
-| `--model-repo` / `--model-file` | `unsloth/gemma-4-E2B-it-GGUF` / `gemma-4-E2B-it-Q4_K_M.gguf` | HF source |
+| `--model-repo` / `--model-file` | `unsloth/gemma-4-E4B-it-GGUF` / `gemma-4-E4B-it-Q4_K_M.gguf` | HF source |
 | `--ctx-size` | `8192` | Context window (Gemma 4 supports up to 256K) |
 | `--threads` | _auto_ | CPU threads |
 | `--gpu-layers` | all (GPU build) / 0 (CPU) | Layers to offload to GPU |
@@ -76,7 +78,7 @@ All flags have `TMS_*` env-var equivalents:
 Example with a local model and custom port:
 
 ```sh
-./target/release/tinymodelserver --port 9000 --model ~/models/gemma-4-E2B-it-Q4_K_M.gguf
+./target/release/tinymodelserver --port 9000 --model ~/models/gemma-4-E4B-it-Q4_K_M.gguf
 ```
 
 ## API
@@ -87,7 +89,7 @@ OpenAI-compatible. Point any OpenAI client at `http://127.0.0.1:8080/v1`.
 # Chat
 curl http://127.0.0.1:8080/v1/chat/completions \
   -H 'Content-Type: application/json' \
-  -d '{"model":"gemma-4-e2b-it","messages":[{"role":"user","content":"Hi in French?"}]}'
+  -d '{"model":"gemma-4-e4b-it","messages":[{"role":"user","content":"Hi in French?"}]}'
 
 # Embeddings
 curl http://127.0.0.1:8080/v1/embeddings \
@@ -120,7 +122,7 @@ Works directly with the official OpenAI SDKs — just point `base_url` at this s
 from openai import OpenAI
 c = OpenAI(base_url="http://127.0.0.1:8080/v1", api_key="sk-noop")
 c.embeddings.create(model="multilingual-e5-small", input=["hello", "bonjour"])
-c.chat.completions.create(model="gemma-4-e2b-it",
+c.chat.completions.create(model="gemma-4-e4b-it",
     messages=[{"role": "user", "content": "Hi"}])
 ```
 

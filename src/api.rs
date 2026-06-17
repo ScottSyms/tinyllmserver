@@ -178,8 +178,20 @@ async fn chat_completions(
         ));
     }
 
+    let n_tools = req
+        .tools
+        .as_ref()
+        .and_then(|t| t.as_array())
+        .map_or(0, |a| a.len());
+    tracing::debug!(
+        "chat request: {} message(s), {} tool(s)",
+        req.messages.len(),
+        n_tools
+    );
+
     let prompt = gemma::render_prompt(&s.env, req.messages.clone(), req.tools.clone())
         .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
+    tracing::debug!("rendered prompt:\n{prompt}");
 
     let gen = GenRequest {
         prompt,
@@ -197,7 +209,13 @@ async fn chat_completions(
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    tracing::debug!("raw completion:\n{}", out.text);
     let parsed = gemma::parse_completion(&out.text);
+    tracing::debug!(
+        "parsed: {} tool call(s), content {} chars",
+        parsed.tool_calls.len(),
+        parsed.content.as_deref().map_or(0, str::len)
+    );
 
     let (content, tool_calls, finish_reason) = if parsed.tool_calls.is_empty() {
         (parsed.content, None, out.finish_reason.to_string())

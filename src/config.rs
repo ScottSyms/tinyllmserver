@@ -18,19 +18,19 @@ pub struct Config {
     pub model: Option<PathBuf>,
 
     /// Hugging Face repo to pull the GGUF from when --model is not set.
-    #[arg(long, env = "TMS_MODEL_REPO", default_value = "unsloth/gemma-4-E2B-it-GGUF")]
+    #[arg(long, env = "TMS_MODEL_REPO", default_value = "unsloth/gemma-4-E4B-it-GGUF")]
     pub model_repo: String,
 
     /// GGUF filename inside the repo (used with --model-repo).
     #[arg(
         long,
         env = "TMS_MODEL_FILE",
-        default_value = "gemma-4-E2B-it-Q4_K_M.gguf"
+        default_value = "gemma-4-E4B-it-Q4_K_M.gguf"
     )]
     pub model_file: String,
 
     /// Public model id reported by the API (the OpenAI `model` field).
-    #[arg(long, env = "TMS_MODEL_ID", default_value = "gemma-4-e2b-it")]
+    #[arg(long, env = "TMS_MODEL_ID", default_value = "gemma-4-e4b-it")]
     pub model_id: String,
 
     /// Context window size (tokens).
