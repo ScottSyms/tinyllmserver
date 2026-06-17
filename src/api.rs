@@ -11,12 +11,14 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::embeddings::Embedder;
+use crate::gemma;
 use crate::llm::{GenRequest, LlmHandle};
 
 #[derive(Clone)]
 pub struct AppState {
     pub llm: LlmHandle,
     pub embedder: Arc<Embedder>,
+    pub env: Arc<minijinja::Environment<'static>>,
     pub model_id: String,
     pub embed_id: String,
 }
@@ -98,16 +100,14 @@ async fn list_models(State(s): State<AppState>) -> impl IntoResponse {
 // ---------- /v1/chat/completions ----------
 
 #[derive(Deserialize)]
-struct ChatMessage {
-    role: String,
-    #[serde(default)]
-    content: String,
-}
-
-#[derive(Deserialize)]
 struct ChatRequest {
+    /// Raw OpenAI messages, passed straight to the model's chat template
+    /// (handles system/user/assistant/tool roles, tool_calls, content parts).
     #[serde(default)]
-    messages: Vec<ChatMessage>,
+    messages: Vec<serde_json::Value>,
+    /// OpenAI tool definitions, forwarded to the template's tool block.
+    #[serde(default)]
+    tools: Option<serde_json::Value>,
     #[serde(default)]
     max_tokens: Option<usize>,
     #[serde(default)]
@@ -130,7 +130,24 @@ struct ChatChoice {
 #[derive(Serialize)]
 struct ChatResponseMessage {
     role: String,
-    content: String,
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ToolCallOut>>,
+}
+
+#[derive(Serialize)]
+struct ToolCallOut {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: FunctionOut,
+}
+
+#[derive(Serialize)]
+struct FunctionOut {
+    name: String,
+    /// JSON-encoded argument object, per the OpenAI spec.
+    arguments: String,
 }
 
 #[derive(Serialize)]
@@ -150,44 +167,6 @@ struct ChatResponse {
     usage: Usage,
 }
 
-/// Render messages using Gemma's chat template. Gemma has no system role, so a
-/// system message is prepended to the first user turn. BOS is added at tokenize.
-fn build_gemma_prompt(messages: &[ChatMessage]) -> String {
-    let mut system = String::new();
-    let mut prompt = String::new();
-    let mut first_user_done = false;
-
-    for m in messages {
-        match m.role.as_str() {
-            "system" => {
-                if !system.is_empty() {
-                    system.push('\n');
-                }
-                system.push_str(&m.content);
-            }
-            "assistant" | "model" => {
-                prompt.push_str("<start_of_turn>model\n");
-                prompt.push_str(&m.content);
-                prompt.push_str("<end_of_turn>\n");
-            }
-            // treat "user" and anything else as a user turn
-            _ => {
-                prompt.push_str("<start_of_turn>user\n");
-                if !first_user_done && !system.is_empty() {
-                    prompt.push_str(&system);
-                    prompt.push_str("\n\n");
-                    first_user_done = true;
-                }
-                prompt.push_str(&m.content);
-                prompt.push_str("<end_of_turn>\n");
-            }
-        }
-    }
-
-    prompt.push_str("<start_of_turn>model\n");
-    prompt
-}
-
 async fn chat_completions(
     State(s): State<AppState>,
     Json(req): Json<ChatRequest>,
@@ -199,8 +178,12 @@ async fn chat_completions(
         ));
     }
 
+    let prompt = gemma::render_prompt(&s.env, req.messages.clone(), req.tools.clone())
+        .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("prompt rendering failed: {e}")))?;
+
     let gen = GenRequest {
-        prompt: build_gemma_prompt(&req.messages),
+        prompt,
+        add_bos: false, // the template emits <bos> itself
         max_tokens: req.max_tokens.unwrap_or(512).clamp(1, 8192),
         temperature: req.temperature.unwrap_or(0.7),
         top_p: req.top_p.unwrap_or(0.95),
@@ -214,6 +197,27 @@ async fn chat_completions(
         .await
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
+    let parsed = gemma::parse_completion(&out.text);
+
+    let (content, tool_calls, finish_reason) = if parsed.tool_calls.is_empty() {
+        (parsed.content, None, out.finish_reason.to_string())
+    } else {
+        let calls = parsed
+            .tool_calls
+            .into_iter()
+            .enumerate()
+            .map(|(i, tc)| ToolCallOut {
+                id: format!("call_{}_{i}", now()),
+                kind: "function",
+                function: FunctionOut {
+                    name: tc.name,
+                    arguments: tc.arguments,
+                },
+            })
+            .collect();
+        (parsed.content, Some(calls), "tool_calls".to_string())
+    };
+
     Ok(Json(ChatResponse {
         id: format!("chatcmpl-{}", now()),
         object: "chat.completion",
@@ -223,9 +227,10 @@ async fn chat_completions(
             index: 0,
             message: ChatResponseMessage {
                 role: "assistant".into(),
-                content: out.text,
+                content,
+                tool_calls,
             },
-            finish_reason: out.finish_reason.into(),
+            finish_reason,
         }],
         usage: Usage {
             prompt_tokens: out.prompt_tokens,

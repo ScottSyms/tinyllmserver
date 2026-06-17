@@ -15,6 +15,9 @@ use llama_cpp_2::sampling::LlamaSampler;
 /// Parameters for a single generation request.
 pub struct GenRequest {
     pub prompt: String,
+    /// Prepend the BOS token at tokenization. False when the prompt text
+    /// already contains `<bos>` (e.g. rendered by the model's chat template).
+    pub add_bos: bool,
     pub max_tokens: usize,
     pub temperature: f32,
     pub top_p: f32,
@@ -60,10 +63,11 @@ pub struct LlmConfig {
 }
 
 /// Spawn the inference worker. Blocks until the model is loaded so startup
-/// errors surface immediately rather than on the first request.
-pub fn start(cfg: LlmConfig) -> Result<LlmHandle> {
+/// errors surface immediately rather than on the first request. Returns the
+/// handle plus the model's embedded chat template.
+pub fn start(cfg: LlmConfig) -> Result<(LlmHandle, String)> {
     let (tx, rx) = mpsc::channel::<Job>();
-    let (ready_tx, ready_rx) = mpsc::channel::<Result<(), String>>();
+    let (ready_tx, ready_rx) = mpsc::channel::<Result<String, String>>();
 
     std::thread::Builder::new()
         .name("llm-worker".into())
@@ -101,7 +105,23 @@ pub fn start(cfg: LlmConfig) -> Result<LlmHandle> {
                 }
             };
 
-            let _ = ready_tx.send(Ok(()));
+            // Extract the chat template baked into the model so the server can
+            // render prompts (including tool definitions) exactly as trained.
+            let template = match model.chat_template(None) {
+                Ok(t) => match t.to_string() {
+                    Ok(s) => s,
+                    Err(e) => {
+                        let _ = ready_tx.send(Err(format!("chat template is not UTF-8: {e}")));
+                        return;
+                    }
+                },
+                Err(e) => {
+                    let _ = ready_tx.send(Err(format!("could not read chat template: {e}")));
+                    return;
+                }
+            };
+
+            let _ = ready_tx.send(Ok(template));
 
             // Serve requests one at a time on this thread (state is not Send).
             for job in rx {
@@ -112,12 +132,12 @@ pub fn start(cfg: LlmConfig) -> Result<LlmHandle> {
         })
         .context("failed to spawn inference worker thread")?;
 
-    ready_rx
+    let template = ready_rx
         .recv()
         .context("inference worker exited during startup")?
         .map_err(anyhow::Error::msg)?;
 
-    Ok(LlmHandle { tx })
+    Ok((LlmHandle { tx }, template))
 }
 
 fn build_sampler(req: &GenRequest) -> LlamaSampler {
@@ -140,8 +160,13 @@ fn generate(
 ) -> Result<GenResult> {
     ctx.clear_kv_cache();
 
+    let add_bos = if req.add_bos {
+        AddBos::Always
+    } else {
+        AddBos::Never
+    };
     let tokens = model
-        .str_to_token(&req.prompt, AddBos::Always)
+        .str_to_token(&req.prompt, add_bos)
         .context("tokenization failed")?;
     let n_prompt = tokens.len();
 
@@ -176,7 +201,9 @@ fn generate(
             break;
         }
 
-        let bytes = model.token_to_piece_bytes(token, 32, false, None)?;
+        // Keep special tokens (special=true) so tool-call markers like
+        // `<|tool_call>` and the string delimiter `<|"|>` survive for parsing.
+        let bytes = model.token_to_piece_bytes(token, 32, true, None)?;
         out_bytes.extend_from_slice(&bytes);
 
         batch.clear();
@@ -191,10 +218,15 @@ fn generate(
         ctx.decode(&mut batch).context("decode failed")?;
     }
 
-    // Gemma's `<end_of_turn>` marker is not flagged as an EOG token, so it can
-    // render as literal text just before generation stops. Cut it off.
+    // Gemma's turn-end markers (`<turn|>` for Gemma 4, `<end_of_turn>` for the
+    // older template) aren't always flagged as EOG tokens, so they can render as
+    // literal text just before generation stops. Cut at the earliest one.
     let mut text = String::from_utf8_lossy(&out_bytes).to_string();
-    if let Some(idx) = text.find("<end_of_turn>") {
+    let cut = ["<turn|>", "<end_of_turn>"]
+        .iter()
+        .filter_map(|m| text.find(m))
+        .min();
+    if let Some(idx) = cut {
         text.truncate(idx);
         finish_reason = "stop";
     }

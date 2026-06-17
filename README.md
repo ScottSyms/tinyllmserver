@@ -99,7 +99,18 @@ curl http://127.0.0.1:8080/v1/models
 curl http://127.0.0.1:8080/health
 ```
 
-Supported chat params: `messages`, `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`.
+Supported chat params: `messages`, `max_tokens`, `temperature`, `top_p`, `top_k`, `seed`, `tools`.
+
+### Function / tool calling
+
+Standard OpenAI function calling is supported. Pass `tools`; when the model decides to
+call one, the response comes back with `finish_reason: "tool_calls"` and a structured
+`message.tool_calls` array (arguments as a JSON string), and you feed `role: "tool"`
+results back in the next request — the normal agentic loop.
+
+Prompts are rendered with the model's **own** chat template (extracted from the GGUF and
+run through minijinja), so tool definitions use Gemma 4's native format and the model's
+`<|tool_call>…<tool_call|>` output is parsed back into OpenAI `tool_calls`.
 
 ### OpenAI SDK compatibility
 
