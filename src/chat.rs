@@ -36,12 +36,30 @@ pub fn render_prompt(
     tools: Option<Value>,
     bos_token: &str,
 ) -> Result<String> {
-    // OpenAI sends assistant tool-call arguments as a JSON *string*; some
-    // templates serialize a mapping differently than a raw string, so parse it
-    // into an object first to keep history in the native format.
     for m in &mut messages {
-        if m.get("role").and_then(Value::as_str) == Some("assistant") {
-            if let Some(tcs) = m.get_mut("tool_calls").and_then(Value::as_array_mut) {
+        let Some(obj) = m.as_object_mut() else { continue };
+
+        // Coerce `content` to a plain string. Templates do `<text> in content`
+        // and `... + content`, which fail on null content (sent on tool-call
+        // turns) or content-part arrays. null/missing -> "", arrays -> joined
+        // text parts.
+        let content = match obj.get("content") {
+            None | Some(Value::Null) => String::new(),
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join(""),
+            Some(other) => other.to_string(),
+        };
+        obj.insert("content".into(), Value::String(content));
+
+        // OpenAI sends assistant tool-call arguments as a JSON *string*; some
+        // templates serialize a mapping differently than a raw string, so parse
+        // it into an object first to keep history in the native format.
+        if obj.get("role").and_then(Value::as_str) == Some("assistant") {
+            if let Some(tcs) = obj.get_mut("tool_calls").and_then(Value::as_array_mut) {
                 for tc in tcs {
                     if let Some(func) = tc.get_mut("function") {
                         if let Some(s) = func.get("arguments").and_then(Value::as_str) {
