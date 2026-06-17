@@ -28,6 +28,9 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
+        // Allow browser-based clients (extensions, web apps) to call the API
+        // cross-origin. Safe here because the server binds to localhost only.
+        .layer(tower_http::cors::CorsLayer::permissive())
         .with_state(state)
 }
 
