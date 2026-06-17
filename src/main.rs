@@ -56,6 +56,7 @@ async fn main() -> Result<()> {
         embedder,
         env,
         bos_token,
+        default_max_tokens: cfg.max_tokens,
         model_id: cfg.model_id.clone(),
         embed_id: cfg.embed_id.clone(),
     };

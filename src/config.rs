@@ -41,6 +41,12 @@ pub struct Config {
     #[arg(long, env = "TMS_CTX_SIZE", default_value_t = 8192)]
     pub ctx_size: u32,
 
+    /// Default max generated tokens when the request doesn't set max_tokens.
+    /// Thinking models (e.g. LFM2.5-Thinking) need plenty of room before the
+    /// answer, so this is generous.
+    #[arg(long, env = "TMS_MAX_TOKENS", default_value_t = 2048)]
+    pub max_tokens: usize,
+
     /// CPU threads for inference. Defaults to available parallelism.
     #[arg(long, env = "TMS_THREADS")]
     pub threads: Option<i32>,

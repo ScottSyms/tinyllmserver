@@ -20,6 +20,7 @@ pub struct AppState {
     pub embedder: Arc<Embedder>,
     pub env: Arc<minijinja::Environment<'static>>,
     pub bos_token: Arc<str>,
+    pub default_max_tokens: usize,
     pub model_id: String,
     pub embed_id: String,
 }
@@ -197,7 +198,7 @@ async fn chat_completions(
     let gen = GenRequest {
         prompt,
         add_bos: false, // the template emits <bos> itself
-        max_tokens: req.max_tokens.unwrap_or(512).clamp(1, 8192),
+        max_tokens: req.max_tokens.unwrap_or(s.default_max_tokens).clamp(1, 32768),
         temperature: req.temperature.unwrap_or(0.7),
         top_p: req.top_p.unwrap_or(0.95),
         top_k: req.top_k.unwrap_or(40),
