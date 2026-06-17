@@ -23,11 +23,41 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
+        .route("/", get(index))
         .route("/health", get(|| async { "ok" }))
         .route("/v1/models", get(list_models))
         .route("/v1/chat/completions", post(chat_completions))
         .route("/v1/embeddings", post(embeddings))
         .with_state(state)
+}
+
+/// Human-friendly landing page so hitting the server in a browser shows
+/// something useful instead of a bare 404. The actual API is JSON over POST.
+async fn index(State(s): State<AppState>) -> Response {
+    let html = format!(
+        r#"<!doctype html><html><head><meta charset="utf-8">
+<title>tinymodelserver</title>
+<style>body{{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:3rem auto;padding:0 1rem;color:#222}}
+code{{background:#f3f3f3;padding:.1em .3em;border-radius:4px}}
+.m{{color:#0a7}}.p{{color:#a60}}</style></head><body>
+<h1>tinymodelserver</h1>
+<p>OpenAI-compatible local server. This is a JSON API — point a client at
+<code>{base}/v1</code>.</p>
+<ul>
+<li><span class="m">GET</span> <a href="/health">/health</a></li>
+<li><span class="m">GET</span> <a href="/v1/models">/v1/models</a></li>
+<li><span class="p">POST</span> <code>/v1/chat/completions</code> &nbsp;(model: <code>{chat}</code>)</li>
+<li><span class="p">POST</span> <code>/v1/embeddings</code> &nbsp;(model: <code>{embed}</code>)</li>
+</ul>
+<p>The POST endpoints can't be opened directly in a browser. Try:</p>
+<pre>curl {base}/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{{"model":"{chat}","messages":[{{"role":"user","content":"Hello"}}]}}'</pre>
+</body></html>"#,
+        base = "http://127.0.0.1:8080",
+        chat = s.model_id,
+        embed = s.embed_id,
+    );
+    axum::response::Html(html).into_response()
 }
 
 fn now() -> u64 {
